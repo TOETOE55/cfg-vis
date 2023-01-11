@@ -1,0 +1,20 @@
+[package]
+name = "cfg-vis"
+version = "0.1.0"
+edition = "2021"
+authors = ["TOETOE55 <584605539@qq.com>"]
+readme = "README.md"
+license = "MIT"
+keywords = ["macro", "cfg"]
+description = """
+A macro to support `#[cfg()]` on visibility.
+"""
+
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "1.0", features = ["full"] }
