@@ -129,15 +129,15 @@ impl VisitMut for FieldVisibilityReplace {
                             .is_some()
                     })
                     .and_then(|ind| {
-                        let attr = field.attrs.remove(ind).tokens;
+                        let attr = &field.attrs[ind].tokens;
                         let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) =
                             parse_quote!(#attr);
 
                         let mut field_if_cfg = field.clone();
                         field_if_cfg.vis = vis;
 
-                        field_if_cfg.attrs.push(parse_quote! { #[cfg(#cfg)] });
-                        field.attrs.push(parse_quote! { #[cfg(not(#cfg))] });
+                        field_if_cfg.attrs[ind] = parse_quote! { #[cfg(#cfg)] };
+                        field.attrs[ind] = parse_quote! { #[cfg(not(#cfg))] };
 
                         Some(vec![field_if_cfg, field.clone()])
                     })
