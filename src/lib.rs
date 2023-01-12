@@ -116,7 +116,7 @@ struct FieldVisibilityReplace;
 
 impl VisitMut for FieldVisibilityReplace {
     fn visit_fields_mut(&mut self, fields: &mut syn::Fields) {
-        let mut fields_if_cfg = Vec::new();
+        let mut new_fields = syn::punctuated::Punctuated::new();
 
         for field in &mut *fields {
             if let Some(ind) = field.attrs.iter().position(|attr| {
@@ -134,25 +134,16 @@ impl VisitMut for FieldVisibilityReplace {
                 field_if_cfg.attrs.push(parse_quote! { #[cfg(#cfg)] });
                 field.attrs.push(parse_quote! { #[cfg(not(#cfg))] });
 
-                fields_if_cfg.push(field_if_cfg);
+                new_fields.push(field_if_cfg);
+                new_fields.push(field.clone());
             }
         }
 
         match fields {
-            syn::Fields::Named(fields) => {
-                for field in fields_if_cfg {
-                    fields.named.push(field);
-                }
-            }
-            syn::Fields::Unnamed(fields) => {
-                for field in fields_if_cfg {
-                    fields.unnamed.push(field);
-                }
-            }
+            syn::Fields::Named(fields) => fields.named = new_fields,
+            syn::Fields::Unnamed(fields) => fields.unnamed = new_fields,
             syn::Fields::Unit => (),
         }
-
-        syn::visit_mut::visit_fields_mut(self, fields);
     }
 }
 
@@ -178,7 +169,20 @@ pub fn cfg_vis_fields(
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let mut item = parse_macro_input!(item as syn::Item);
+
+    match item {
+        syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) => (),
+        _ => {
+            let err = syn::Error::new(
+                item.span(),
+                "`cfg_vis_fields` can only apply on struct, enum or union",
+            );
+            return proc_macro::TokenStream::from(err.into_compile_error());
+        }
+    }
+
     FieldVisibilityReplace.visit_item_mut(&mut item);
+
     let tokens = quote! { #item };
     proc_macro::TokenStream::from(tokens)
 }
