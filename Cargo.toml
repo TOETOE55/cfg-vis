@@ -6,6 +6,7 @@ authors = ["TOETOE55 <584605539@qq.com>"]
 readme = "README.md"
 license = "MIT"
 keywords = ["macro", "cfg"]
+repository = "https://github.com/TOETOE55/cfg-vis"
 description = """
 A macro to support `#[cfg()]` on visibility.
 """
