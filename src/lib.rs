@@ -116,28 +116,34 @@ struct FieldVisibilityReplace;
 
 impl VisitMut for FieldVisibilityReplace {
     fn visit_fields_mut(&mut self, fields: &mut syn::Fields) {
-        let mut new_fields = syn::punctuated::Punctuated::new();
+        let new_fields = (&mut *fields)
+            .into_iter()
+            .flat_map(|field| {
+                field
+                    .attrs
+                    .iter()
+                    .position(|attr| {
+                        attr.path
+                            .get_ident()
+                            .filter(|&ident| ident == "cfg_vis")
+                            .is_some()
+                    })
+                    .and_then(|ind| {
+                        let attr = field.attrs.remove(ind).tokens;
+                        let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) =
+                            parse_quote!(#attr);
 
-        for field in &mut *fields {
-            if let Some(ind) = field.attrs.iter().position(|attr| {
-                attr.path
-                    .get_ident()
-                    .filter(|&ident| ident == "cfg_vis")
-                    .is_some()
-            }) {
-                let attr = field.attrs.remove(ind).tokens;
-                let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
+                        let mut field_if_cfg = field.clone();
+                        field_if_cfg.vis = vis;
 
-                let mut field_if_cfg = field.clone();
-                field_if_cfg.vis = vis;
+                        field_if_cfg.attrs.push(parse_quote! { #[cfg(#cfg)] });
+                        field.attrs.push(parse_quote! { #[cfg(not(#cfg))] });
 
-                field_if_cfg.attrs.push(parse_quote! { #[cfg(#cfg)] });
-                field.attrs.push(parse_quote! { #[cfg(not(#cfg))] });
-
-                new_fields.push(field_if_cfg);
-                new_fields.push(field.clone());
-            }
-        }
+                        Some(vec![field_if_cfg, field.clone()])
+                    })
+                    .unwrap_or_else(|| vec![field.clone()])
+            })
+            .collect();
 
         match fields {
             syn::Fields::Named(fields) => fields.named = new_fields,
