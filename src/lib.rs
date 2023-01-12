@@ -2,8 +2,9 @@
 
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::parse_macro_input;
 use syn::spanned::Spanned;
+use syn::visit_mut::VisitMut;
+use syn::{parenthesized, parse_macro_input, parse_quote};
 
 struct CfgVisAttrArgs {
     cfg: syn::NestedMeta,
@@ -27,7 +28,6 @@ impl Parse for CfgVisAttrArgs {
         Ok(Self { cfg, vis })
     }
 }
-
 
 ///
 /// # Rules
@@ -99,5 +99,86 @@ pub fn cfg_vis(
         #default_item
     };
 
+    proc_macro::TokenStream::from(tokens)
+}
+
+struct CfgVisAttrArgsWithParens(CfgVisAttrArgs);
+
+impl Parse for CfgVisAttrArgsWithParens {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let content;
+        parenthesized!(content in input);
+        Ok(Self(content.parse()?))
+    }
+}
+
+struct FieldVisibilityReplace;
+
+impl VisitMut for FieldVisibilityReplace {
+    fn visit_fields_mut(&mut self, fields: &mut syn::Fields) {
+        let mut fields_if_cfg = Vec::new();
+
+        for field in &mut *fields {
+            if let Some(ind) = field.attrs.iter().position(|attr| {
+                attr.path
+                    .get_ident()
+                    .filter(|&ident| ident == "cfg_vis")
+                    .is_some()
+            }) {
+                let attr = field.attrs.remove(ind).tokens;
+                let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
+
+                let mut field_if_cfg = field.clone();
+                field_if_cfg.vis = vis;
+
+                field_if_cfg.attrs.push(parse_quote! { #[cfg(#cfg)] });
+                field.attrs.push(parse_quote! { #[cfg(not(#cfg))] });
+
+                fields_if_cfg.push(field_if_cfg);
+            }
+        }
+
+        match fields {
+            syn::Fields::Named(fields) => {
+                for field in fields_if_cfg {
+                    fields.named.push(field);
+                }
+            }
+            syn::Fields::Unnamed(fields) => {
+                for field in fields_if_cfg {
+                    fields.unnamed.push(field);
+                }
+            }
+            syn::Fields::Unit => (),
+        }
+
+        syn::visit_mut::visit_fields_mut(self, fields);
+    }
+}
+
+///
+/// # Rules
+///
+/// # Example
+///
+/// ```rust
+/// use cfg_vis::cfg_vis_fields;
+///
+/// #[cfg_vis_fields]
+/// struct Foo {
+///     // while the target is linux, the visibility is `pub`.
+///     #[cfg_vis(target_os = "linux", pub)]
+///     foo: i32,
+/// }
+/// ```
+///
+#[proc_macro_attribute]
+pub fn cfg_vis_fields(
+    _attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let mut item = parse_macro_input!(item as syn::Item);
+    FieldVisibilityReplace.visit_item_mut(&mut item);
+    let tokens = quote! { #item };
     proc_macro::TokenStream::from(tokens)
 }
