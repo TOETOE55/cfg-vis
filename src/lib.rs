@@ -197,23 +197,18 @@ fn find_replace_cfg_vis(
 ) -> syn::Result<Punctuated<syn::Field, syn::Token![,]>> {
     let mut fields_replaced = Punctuated::new();
     for mut field in fields {
-        let pos = if let Some(pos) = guard_cfg_vis_unique(&field.attrs, false)? {
-            pos
-        } else {
-            fields_replaced.push(field);
-            continue;
-        };
-        let attr = &field.attrs[pos].tokens;
-        let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
+        if let Some(pos) = guard_cfg_vis_unique(&field.attrs, false)? {
+            let attr = &field.attrs[pos].tokens;
+            let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
 
-        let mut field_default = field.clone();
-        field.attrs[pos] = parse_quote! { #[cfg(#cfg)] };
-        field.vis = vis;
+            let mut field_replaced = field.clone();
+            field_replaced.attrs[pos] = parse_quote! { #[cfg(#cfg)] };
+            field_replaced.vis = vis;
+            fields_replaced.push(field_replaced);
 
-        field_default.attrs[pos] = parse_quote! { #[cfg(not(#cfg))] };
-
+            field.attrs[pos] = parse_quote! { #[cfg(not(#cfg))] };
+        }
         fields_replaced.push(field);
-        fields_replaced.push(field_default);
     }
 
     Ok(fields_replaced)
