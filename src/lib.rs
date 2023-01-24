@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use proc_macro2::Span;
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -45,17 +45,27 @@ impl Parse for CfgVisAttrArgsWithParens {
 /// ## Rules
 ///
 /// ```ignore
-/// #[cfg_vis($cfg: meta, $vis: vis)]
+/// #[cfg_vis($cond1:meta, $vis1:vis)]
+/// #[cfg_vis($cond2:meta, $vis2:vis)]
+/// #[cfg_vis($cond3:meta, $vis3:vis)]
 /// $default_vis:vis $($item:tt)*
 /// ```
 ///
 /// will expend to
 ///
 /// ```ignore
-/// #[cfg($cfg)]
-/// $vis $($item)*
+/// #[cfg($cond1)]
+/// $vis1 $($item)*
 ///
-/// #[cfg(not($cfg))]
+/// #[cfg($cond2)]
+/// $vis2 $($item)*
+///
+/// #[cfg($cond3)]
+/// $vis3 $($item)*
+///
+/// #[cfg(not($cond1))]
+/// #[cfg(not($cond2))]
+/// #[cfg(not($cond3))]
 /// $default_vis $($item)*
 /// ```
 ///
@@ -74,60 +84,68 @@ pub fn cfg_vis(
     attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let CfgVisAttrArgs { cfg, vis } = parse_macro_input!(attr as CfgVisAttrArgs);
+    let cfg_vis_attr = parse_macro_input!(attr as CfgVisAttrArgs);
     let item = parse_macro_input!(item as syn::Item);
-    cfg_vis_impl(cfg, vis, item)
+    cfg_vis_impl(cfg_vis_attr, item)
         .unwrap_or_else(|err| proc_macro::TokenStream::from(err.into_compile_error()))
 }
 
 fn cfg_vis_impl(
-    cfg: syn::NestedMeta,
-    vis: syn::Visibility,
+    cfg_vis_attr: CfgVisAttrArgs,
     mut item: syn::Item,
 ) -> syn::Result<proc_macro::TokenStream> {
-    let default_item = item.clone();
+    fn proj_item(
+        item: &mut syn::Item,
+    ) -> syn::Result<(&mut syn::Visibility, &mut Vec<syn::Attribute>)> {
+        let proj = match item {
+            syn::Item::Const(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Enum(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::ExternCrate(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Fn(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Macro2(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Mod(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Static(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Struct(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Trait(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::TraitAlias(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Type(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Union(i) => (&mut i.vis, &mut i.attrs),
+            syn::Item::Use(i) => (&mut i.vis, &mut i.attrs),
+            _ => {
+                return Err(syn::Error::new(
+                    item.span(),
+                    "`cfg_vis` can only apply on item with visibility",
+                ));
+            }
+        };
 
-    let (default_vis, attrs) = match &mut item {
-        syn::Item::Const(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Enum(i) => (&mut i.vis, &i.attrs),
-        syn::Item::ExternCrate(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Fn(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Macro2(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Mod(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Static(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Struct(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Trait(i) => (&mut i.vis, &i.attrs),
-        syn::Item::TraitAlias(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Type(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Union(i) => (&mut i.vis, &i.attrs),
-        syn::Item::Use(i) => (&mut i.vis, &i.attrs),
-        _ => {
-            return Err(syn::Error::new(
-                item.span(),
-                "`cfg_vis` can only apply on item with visibility",
-            ));
-        }
-    };
+        Ok(proj)
+    }
 
-    guard_cfg_vis_unique(attrs, true)?;
+    let (default_vis, attrs) = proj_item(&mut item)?;
 
-    *default_vis = vis;
+    let mut cfg_vis_attrs = take_all_cfg_vis(attrs)?;
+    cfg_vis_attrs.push(cfg_vis_attr);
 
-    let tokens = quote! {
-        #[cfg(#cfg)]
-        #item
+    let mut token_stream = proc_macro2::TokenStream::new();
+    for (mut cfgs, vis) in expend_cfg_vis_attrs(cfg_vis_attrs, default_vis.clone()) {
+        let mut item = item.clone();
+        let (item_vis, attrs) = proj_item(&mut item)?;
+        *item_vis = vis;
+        attrs.append(&mut cfgs);
 
-        #[cfg(not(#cfg))]
-        #default_item
-    };
+        item.to_tokens(&mut token_stream);
+    }
 
-    Ok(proc_macro::TokenStream::from(tokens))
+    Ok(proc_macro::TokenStream::from(token_stream))
 }
 
 ///
 /// # cfg visibility on fields
 ///
 /// ## Rules
+///
+/// `#[cfg_vis]` on field as same as it on item.
 ///
 /// ## Example
 ///
@@ -165,6 +183,24 @@ pub fn cfg_vis_fields(
 }
 
 fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
+    fn find_replace_cfg_vis(
+        fields: Punctuated<syn::Field, syn::Token![,]>,
+    ) -> syn::Result<Punctuated<syn::Field, syn::Token![,]>> {
+        let mut fields_replaced = vec![];
+
+        for mut field in fields {
+            let cfg_vis_attrs = take_all_cfg_vis(&mut field.attrs)?;
+            for (mut cfgs, vis) in expend_cfg_vis_attrs(cfg_vis_attrs, field.vis.clone()) {
+                let mut field = field.clone();
+                field.vis = vis;
+                field.attrs.append(&mut cfgs);
+                fields_replaced.push(field);
+            }
+        }
+
+        Ok(Punctuated::from_iter(fields_replaced))
+    }
+
     let fields = match &mut item {
         syn::Item::Struct(s) => {
             let fields = match &mut s.fields {
@@ -192,54 +228,49 @@ fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
     Ok(item)
 }
 
-fn find_replace_cfg_vis(
-    fields: Punctuated<syn::Field, syn::Token![,]>,
-) -> syn::Result<Punctuated<syn::Field, syn::Token![,]>> {
-    let mut fields_replaced = Punctuated::new();
-    for mut field in fields {
-        if let Some(pos) = guard_cfg_vis_unique(&field.attrs, false)? {
-            let attr = &field.attrs[pos].tokens;
-            let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
+fn take_all_cfg_vis(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Vec<CfgVisAttrArgs>> {
+    let (cfg_vis_attrs, remain_attrs): (Vec<_>, Vec<_>) =
+        std::mem::take(attrs).into_iter().partition(|attr| {
+            attr.path
+                .get_ident()
+                .filter(|&ident| ident == "cfg_vis")
+                .is_some()
+        });
 
-            let mut field_replaced = field.clone();
-            field_replaced.attrs[pos] = parse_quote! { #[cfg(#cfg)] };
-            field_replaced.vis = vis;
-            fields_replaced.push(field_replaced);
+    *attrs = remain_attrs;
 
-            field.attrs[pos] = parse_quote! { #[cfg(not(#cfg))] };
-        }
-        fields_replaced.push(field);
-    }
-
-    Ok(fields_replaced)
+    cfg_vis_attrs
+        .into_iter()
+        .map(|attr| {
+            let cfg_vis_attr = syn::parse2::<CfgVisAttrArgsWithParens>(attr.tokens)?;
+            Ok(cfg_vis_attr.0)
+        })
+        .collect()
 }
 
-fn guard_cfg_vis_unique(
-    attrs: &[syn::Attribute],
-    is_attr_proc: bool,
-) -> syn::Result<Option<usize>> {
-    let mut count = is_attr_proc as i32;
-    let mut pos = None;
+fn expend_cfg_vis_attrs(
+    cfg_vis_attrs: Vec<CfgVisAttrArgs>,
+    default_vis: syn::Visibility,
+) -> impl Iterator<Item = (Vec<syn::Attribute>, syn::Visibility)> {
+    let default_cfg_attrs = cfg_vis_attrs
+        .iter()
+        .map(|attr| {
+            let cfg = &attr.cfg;
+            parse_quote! {
+                #[cfg(not(#cfg))]
+            }
+        })
+        .collect::<Vec<_>>();
 
-    for (i, attr) in attrs.iter().enumerate() {
-        let has_cfg_vis = attr
-            .path
-            .get_ident()
-            .filter(|&ident| ident == "cfg_vis")
-            .is_some();
+    cfg_vis_attrs
+        .into_iter()
+        .map(|cfg_vis| {
+            let cfg = cfg_vis.cfg;
+            let cfgs = vec![parse_quote! {
+                #[cfg(#cfg)]
+            }];
 
-        if has_cfg_vis {
-            count += 1;
-            pos = Some(i);
-        }
-
-        if count > 1 {
-            return Err(syn::Error::new(
-                attr.span(),
-                "multiple `cfg_vis` is not allowed",
-            ));
-        }
-    }
-
-    Ok(pos)
+            (cfgs, cfg_vis.vis)
+        })
+        .chain(Some((default_cfg_attrs, default_vis)))
 }

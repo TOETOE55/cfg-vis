@@ -13,6 +13,12 @@ mod inner {
         true
     }
 
+    #[cfg_vis(target_os = "linux", pub)]
+    #[cfg_vis(target_os = "windows", pub(super))]
+    fn prv_in_macos() -> bool {
+        true
+    }
+
     #[cfg_vis(target_os = "windows", pub(super))]
     const PUBLIC_IN_WINDOWS: bool = true;
 
@@ -29,6 +35,13 @@ mod inner {
 
     #[cfg_vis_fields]
     pub struct Bar(#[cfg_vis(test, pub)] i32, #[cfg_vis(test)] pub i32);
+
+    #[cfg_vis_fields]
+    pub struct Baz {
+        #[cfg_vis(target_os = "linux", pub)]
+        #[cfg_vis(target_os = "windows", pub(super))]
+        prv_in_macos: i32,
+    }
 }
 
 // mod will_not_compile {
@@ -79,6 +92,11 @@ fn it_works() {
         assert!(inner::PUBLIC_IN_WINDOWS);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        assert!(inner::prv_in_macos());
+    }
+
     #[cfg(target_os = "macos")]
     {
         assert!(inner::PUBLIC_IN_WINDOWS);
@@ -86,7 +104,11 @@ fn it_works() {
 }
 
 #[cfg(test)]
-fn struct_fields_work(foo: inner::Foo, bar: inner::Bar) {
+fn struct_fields_work(foo: inner::Foo, bar: inner::Bar, baz: inner::Baz) {
     foo.pub_in_test;
     bar.0;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        baz.prv_in_macos;
+    }
 }
