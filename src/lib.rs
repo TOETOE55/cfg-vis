@@ -74,8 +74,8 @@ impl Parse for CfgVisAttrArgsWithParens {
 /// ```rust
 /// use cfg_vis::cfg_vis;
 ///
-/// // default visibility is `pub`, while the target is linux, the visibility is `pub(super)`.
-/// #[cfg_vis(target_os = "linux", pub(super))]
+/// // default visibility is `pub`, while the target is linux, the visibility is `pub(crate)`.
+/// #[cfg_vis(target_os = "linux", pub(crate))]
 /// pub fn foo() {}
 /// ```
 ///
