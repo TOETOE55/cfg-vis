@@ -81,6 +81,14 @@ mod inner {
 //
 //     #[cfg_vis_fields(sdfdsfa)]
 //     struct WrongArgs;
+//
+//     #[cfg_vis::__cfg_vis_accumulator("aasdas";)]
+//     #[cfg_vis::cfg_vis(target_os = "windows")]
+//     struct ExpansionOrderErr;
+//
+//     #[cfg_vis::cfg_vis(target_os = "windows")]
+//     #[::cfg_vis::__cfg_vis_accumulator("aasdas")]
+//     struct ExpansionVersionErr;
 // }
 
 #[test]
