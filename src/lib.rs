@@ -1,9 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -136,17 +136,13 @@ fn assert_cfg_vis_is_unique(item: &syn::Item) -> TokenStream {
     // different version of package make a different accumulator
     env!("CARGO_PKG_VERSION").hash(&mut hasher);
 
-    let name = format!(
-        "__CFG_VIS_MUST_CALL_ONCE_{}",
-        hasher.finish()
-    );
+    let name = format!("__CFG_VIS_MUST_CALL_ONCE_{}", hasher.finish());
     let check_unique = syn::Ident::new(&name, Span::call_site());
 
     quote! {
         const #check_unique: () = ();
     }
 }
-
 
 struct PartialHashItemHelper<'a>(&'a syn::Item);
 
@@ -244,15 +240,13 @@ pub fn cfg_vis_fields(
 
 fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
     let fields = match &mut item {
-        syn::Item::Struct(s) => {
-            match &mut s.fields {
-                syn::Fields::Named(f) => &mut f.named,
-                syn::Fields::Unnamed(f) => &mut f.unnamed,
-                syn::Fields::Unit => {
-                    return Ok(item);
-                }
+        syn::Item::Struct(s) => match &mut s.fields {
+            syn::Fields::Named(f) => &mut f.named,
+            syn::Fields::Unnamed(f) => &mut f.unnamed,
+            syn::Fields::Unit => {
+                return Ok(item);
             }
-        }
+        },
 
         syn::Item::Union(u) => &mut u.fields.named,
         _ => {
@@ -290,9 +284,7 @@ fn find_replace_cfg_vis(
     Ok(fields_replaced)
 }
 
-fn guard_cfg_vis_unique(
-    attrs: &[syn::Attribute],
-) -> syn::Result<Option<usize>> {
+fn guard_cfg_vis_unique(attrs: &[syn::Attribute]) -> syn::Result<Option<usize>> {
     let mut count = 0;
     let mut pos = None;
 
