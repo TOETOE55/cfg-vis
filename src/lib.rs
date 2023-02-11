@@ -1,18 +1,20 @@
 #![doc = include_str!("../README.md")]
 
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenStream};
+use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{quote, ToTokens};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parenthesized, parse_macro_input, parse_quote};
+use syn::{parse_macro_input, parse_quote};
 
 struct CfgVisAttrArgs {
     cfg: syn::NestedMeta,
+    _comma: Option<syn::Token![,]>,
     vis: syn::Visibility,
 }
-
-struct CfgVisAttrArgsWithParens(CfgVisAttrArgs);
 
 impl Parse for CfgVisAttrArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -22,20 +24,51 @@ impl Parse for CfgVisAttrArgs {
         if comma.is_none() || input.is_empty() {
             return Ok(Self {
                 cfg,
+                _comma: comma,
                 vis: syn::Visibility::Inherited,
             });
         }
 
         let vis = input.parse()?;
 
-        Ok(Self { cfg, vis })
+        Ok(Self {
+            cfg,
+            _comma: comma,
+            vis,
+        })
     }
 }
-impl Parse for CfgVisAttrArgsWithParens {
+
+impl ToTokens for CfgVisAttrArgs {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.cfg.to_tokens(tokens);
+        self._comma.to_tokens(tokens);
+        self.vis.to_tokens(tokens);
+    }
+}
+
+struct CfgVisAttrArgsAccumulator {
+    version: String,
+    _semi: Option<syn::Token![;]>,
+    acc: Punctuated<CfgVisAttrArgs, syn::Token![;]>,
+}
+
+impl Parse for CfgVisAttrArgsAccumulator {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let content;
-        parenthesized!(content in input);
-        Ok(Self(content.parse()?))
+        let version_str: syn::LitStr = input.parse()?;
+        Ok(Self {
+            version: version_str.value(),
+            _semi: input.parse()?,
+            acc: Punctuated::parse_terminated(input)?,
+        })
+    }
+}
+
+impl ToTokens for CfgVisAttrArgsAccumulator {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.version.to_tokens(tokens);
+        self._semi.to_tokens(tokens);
+        self.acc.to_tokens(tokens);
     }
 }
 
@@ -94,50 +127,220 @@ fn cfg_vis_impl(
     cfg_vis_attr: CfgVisAttrArgs,
     mut item: syn::Item,
 ) -> syn::Result<proc_macro::TokenStream> {
-    fn proj_item(
-        item: &mut syn::Item,
-    ) -> syn::Result<(&mut syn::Visibility, &mut Vec<syn::Attribute>)> {
-        let proj = match item {
-            syn::Item::Const(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Enum(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::ExternCrate(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Fn(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Macro2(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Mod(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Static(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Struct(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Trait(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::TraitAlias(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Type(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Union(i) => (&mut i.vis, &mut i.attrs),
-            syn::Item::Use(i) => (&mut i.vis, &mut i.attrs),
-            _ => {
-                return Err(syn::Error::new(
-                    item.span(),
-                    "`cfg_vis` can only apply on item with visibility",
-                ));
+    let version = env!("CARGO_PKG_VERSION");
+    let __cfg_vis_accumulator_declare_path = __cfg_vis_accumulator_declare_path();
+
+    let (_, attrs) = proj_item(&mut item);
+    let mut accumulator= attrs
+        .iter_mut()
+        .filter_map(|acc_attr| {
+            if acc_attr.path == __cfg_vis_accumulator_declare_path {
+                Some((acc_attr.parse_args(), acc_attr))
+            } else {
+                None
             }
-        };
+        })
+        .map(|(acc, attr)| {
+            let acc: CfgVisAttrArgsAccumulator = acc?;
+            if acc.version == version {
+                Ok((acc, attr))
+            } else {
+                Err(syn::Error::new(
+                    Span::call_site(),
+                    format!("multiple versions of cfg-vis conflict, current version: {:?}, other version: {:?}", version, acc.version))
+                )
+            }
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
 
-        Ok(proj)
+    match &mut accumulator[..] {
+        [] => {
+            // the last attr
+            attrs.push(
+                parse_quote!(#[#__cfg_vis_accumulator_declare_path(#version; #cfg_vis_attr)]),
+            );
+        }
+        [(acc, attr)] => {
+            acc.acc.push(cfg_vis_attr);
+            **attr = parse_quote!(#[#__cfg_vis_accumulator_declare_path(#acc)]);
+        }
+        _ => {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "multiple cfg-vis accumulators exist, it's a bug.",
+            ))
+        }
     }
 
-    let (default_vis, attrs) = proj_item(&mut item)?;
+    Ok(item.into_token_stream().into())
+}
 
-    let mut cfg_vis_attrs = take_all_cfg_vis(attrs)?;
-    cfg_vis_attrs.push(cfg_vis_attr);
+// expend after all `cfg_vis` were expended
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn __cfg_vis_accumulator(
+    attr: proc_macro::TokenStream,
+    item: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let accumulator = parse_macro_input!(attr as CfgVisAttrArgsAccumulator);
+    let item = parse_macro_input!(item as syn::Item);
 
-    let mut token_stream = proc_macro2::TokenStream::new();
-    for (mut cfgs, vis) in expend_cfg_vis_attrs(cfg_vis_attrs, default_vis.clone()) {
-        let mut item = item.clone();
-        let (item_vis, attrs) = proj_item(&mut item)?;
-        *item_vis = vis;
-        attrs.append(&mut cfgs);
+    let version = env!("CARGO_PKG_VERSION");
+    if accumulator.version != version {
+        return syn::Error::new(
+            Span::call_site(),
+            format!(
+                "multiple versions of cfg-vis conflict, current version: {:?}, other version: {:?}",
+                version, accumulator.version
+            ),
+        )
+        .into_compile_error()
+        .into();
+    }
+    // generate:
+    //
+    // #[cfg($cond_n)]
+    // $vis_n $($item)*
+    let mut token_stream = TokenStream::new();
+    for cfg_vis_args in &accumulator.acc {
+        let vis = cfg_vis_args.vis.clone();
+        let cfg = &cfg_vis_args.cfg;
 
-        item.to_tokens(&mut token_stream);
+        let mut tmp_item = item.clone();
+        let (tmp_vis, tmp_attrs) = proj_item(&mut tmp_item);
+        *tmp_vis = vis;
+        tmp_attrs.push(parse_quote!(#[cfg(#cfg)]));
+        tmp_item.to_tokens(&mut token_stream);
     }
 
-    Ok(proc_macro::TokenStream::from(token_stream))
+    // generate
+    //
+    // #[cfg(not($cond_1))]
+    // #[cfg(not($cond_2))]
+    // ..
+    // #[cfg(not($cond_n))]
+    // $default_vis $($item)*
+    let cfgs = accumulator.acc.iter().map(|cfg_vis_args| &cfg_vis_args.cfg);
+    let default_item = quote! {
+        #( #[cfg(not(#cfgs))] )*
+        #item
+    };
+    token_stream.extend(default_item);
+
+    // check_unique
+    let check_unique = assert_accumulator_is_unique(&item);
+    token_stream.extend(check_unique);
+
+    token_stream.into()
+}
+
+/// `$crate::__cfg_vis_accumulator`
+fn __cfg_vis_accumulator_declare_path() -> syn::Path {
+    let found_name = crate_name("cfg-vis").expect("cfg-vis is present in `Cargo.toml`");
+
+    match found_name {
+        FoundCrate::Itself => {
+            parse_quote!(::cfg_vis::__cfg_vis_accumulator)
+        }
+        FoundCrate::Name(cfg_vis) => {
+            let cfg_vis = syn::Ident::new(&cfg_vis, Span::call_site());
+            parse_quote!(::#cfg_vis::__cfg_vis_accumulator)
+        }
+    }
+}
+
+fn proj_item(item: &mut syn::Item) -> (&mut syn::Visibility, &mut Vec<syn::Attribute>) {
+    match item {
+        syn::Item::Const(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Enum(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::ExternCrate(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Fn(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Macro2(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Mod(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Static(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Struct(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Trait(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::TraitAlias(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Type(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Union(i) => (&mut i.vis, &mut i.attrs),
+        syn::Item::Use(i) => (&mut i.vis, &mut i.attrs),
+        _ => {
+            panic!("`cfg_vis` can only apply on item with visibility");
+        }
+    }
+}
+
+fn assert_accumulator_is_unique(item: &syn::Item) -> TokenStream {
+    let mut hasher = DefaultHasher::new();
+
+    PartialHashItemHelper(item).hash(&mut hasher);
+
+    // different version of package make a different accumulator
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
+
+    let name = format!(
+        "__CFG_VIS_ACCUMULATOR_MUST_EXPAND_ONCE_OTHERWISE_IS_A_BUG_{}",
+        hasher.finish()
+    );
+    let check_unique = syn::Ident::new(&name, Span::call_site());
+
+    quote! {
+        const #check_unique: () = ();
+    }
+}
+
+struct PartialHashItemHelper<'a>(&'a syn::Item);
+
+impl Hash for PartialHashItemHelper<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self.0).hash(state);
+        match &self.0 {
+            syn::Item::Const(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Enum(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::ExternCrate(v0) => {
+                v0.ident.hash(state);
+                v0.rename.hash(state);
+            }
+            syn::Item::Fn(v0) => {
+                v0.sig.ident.hash(state);
+            }
+            syn::Item::Macro(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Macro2(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Mod(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Static(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Struct(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Trait(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::TraitAlias(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Type(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Union(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Use(v0) => {
+                v0.tree.hash(state);
+            }
+            _ => self.0.hash(state),
+        }
+    }
 }
 
 ///
@@ -202,17 +405,13 @@ fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
     }
 
     let fields = match &mut item {
-        syn::Item::Struct(s) => {
-            let fields = match &mut s.fields {
-                syn::Fields::Named(f) => &mut f.named,
-                syn::Fields::Unnamed(f) => &mut f.unnamed,
-                syn::Fields::Unit => {
-                    return Ok(item);
-                }
-            };
-
-            fields
-        }
+        syn::Item::Struct(s) => match &mut s.fields {
+            syn::Fields::Named(f) => &mut f.named,
+            syn::Fields::Unnamed(f) => &mut f.unnamed,
+            syn::Fields::Unit => {
+                return Ok(item);
+            }
+        },
 
         syn::Item::Union(u) => &mut u.fields.named,
         _ => {
@@ -229,22 +428,15 @@ fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
 }
 
 fn take_all_cfg_vis(attrs: &mut Vec<syn::Attribute>) -> syn::Result<Vec<CfgVisAttrArgs>> {
-    let (cfg_vis_attrs, remain_attrs): (Vec<_>, Vec<_>) =
-        std::mem::take(attrs).into_iter().partition(|attr| {
-            attr.path
-                .get_ident()
-                .filter(|&ident| ident == "cfg_vis")
-                .is_some()
-        });
+    let (cfg_vis_attrs, remain_attrs): (Vec<_>, Vec<_>) = std::mem::take(attrs)
+        .into_iter()
+        .partition(|attr| attr.path.is_ident("cfg_vis"));
 
     *attrs = remain_attrs;
 
     cfg_vis_attrs
         .into_iter()
-        .map(|attr| {
-            let cfg_vis_attr = syn::parse2::<CfgVisAttrArgsWithParens>(attr.tokens)?;
-            Ok(cfg_vis_attr.0)
-        })
+        .map(|attr| attr.parse_args::<CfgVisAttrArgs>())
         .collect()
 }
 
