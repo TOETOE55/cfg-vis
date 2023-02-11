@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-use proc_macro2::Span;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
@@ -87,7 +89,7 @@ fn cfg_vis_impl(
 ) -> syn::Result<proc_macro::TokenStream> {
     let default_item = item.clone();
 
-    let (default_vis, attrs) = match &mut item {
+    let (default_vis, _) = match &mut item {
         syn::Item::Const(i) => (&mut i.vis, &i.attrs),
         syn::Item::Enum(i) => (&mut i.vis, &i.attrs),
         syn::Item::ExternCrate(i) => (&mut i.vis, &i.attrs),
@@ -109,9 +111,9 @@ fn cfg_vis_impl(
         }
     };
 
-    guard_cfg_vis_unique(attrs, true)?;
-
     *default_vis = vis;
+
+    let check_unique = assert_cfg_vis_is_unique(&item);
 
     let tokens = quote! {
         #[cfg(#cfg)]
@@ -119,9 +121,85 @@ fn cfg_vis_impl(
 
         #[cfg(not(#cfg))]
         #default_item
+
+        #check_unique
     };
 
     Ok(proc_macro::TokenStream::from(tokens))
+}
+
+fn assert_cfg_vis_is_unique(item: &syn::Item) -> TokenStream {
+    let mut hasher = DefaultHasher::new();
+
+    PartialHashItemHelper(item).hash(&mut hasher);
+
+    // different version of package make a different accumulator
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
+
+    let name = format!(
+        "__CFG_VIS_MUST_CALL_ONCE_{}",
+        hasher.finish()
+    );
+    let check_unique = syn::Ident::new(&name, Span::call_site());
+
+    quote! {
+        const #check_unique: () = ();
+    }
+}
+
+
+struct PartialHashItemHelper<'a>(&'a syn::Item);
+
+impl Hash for PartialHashItemHelper<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self.0).hash(state);
+        match &self.0 {
+            syn::Item::Const(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Enum(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::ExternCrate(v0) => {
+                v0.ident.hash(state);
+                v0.rename.hash(state);
+            }
+            syn::Item::Fn(v0) => {
+                v0.sig.ident.hash(state);
+            }
+            syn::Item::Macro(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Macro2(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Mod(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Static(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Struct(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Trait(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::TraitAlias(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Type(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Union(v0) => {
+                v0.ident.hash(state);
+            }
+            syn::Item::Use(v0) => {
+                v0.tree.hash(state);
+            }
+            _ => self.0.hash(state),
+        }
+    }
 }
 
 ///
@@ -167,15 +245,13 @@ pub fn cfg_vis_fields(
 fn cfg_vis_fields_impl(mut item: syn::Item) -> syn::Result<syn::Item> {
     let fields = match &mut item {
         syn::Item::Struct(s) => {
-            let fields = match &mut s.fields {
+            match &mut s.fields {
                 syn::Fields::Named(f) => &mut f.named,
                 syn::Fields::Unnamed(f) => &mut f.unnamed,
                 syn::Fields::Unit => {
                     return Ok(item);
                 }
-            };
-
-            fields
+            }
         }
 
         syn::Item::Union(u) => &mut u.fields.named,
@@ -197,7 +273,7 @@ fn find_replace_cfg_vis(
 ) -> syn::Result<Punctuated<syn::Field, syn::Token![,]>> {
     let mut fields_replaced = Punctuated::new();
     for mut field in fields {
-        if let Some(pos) = guard_cfg_vis_unique(&field.attrs, false)? {
+        if let Some(pos) = guard_cfg_vis_unique(&field.attrs)? {
             let attr = &field.attrs[pos].tokens;
             let CfgVisAttrArgsWithParens(CfgVisAttrArgs { cfg, vis }) = parse_quote!(#attr);
 
@@ -216,9 +292,8 @@ fn find_replace_cfg_vis(
 
 fn guard_cfg_vis_unique(
     attrs: &[syn::Attribute],
-    is_attr_proc: bool,
 ) -> syn::Result<Option<usize>> {
-    let mut count = is_attr_proc as i32;
+    let mut count = 0;
     let mut pos = None;
 
     for (i, attr) in attrs.iter().enumerate() {
