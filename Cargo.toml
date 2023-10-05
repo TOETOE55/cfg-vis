@@ -4,6 +4,7 @@ version = "0.3.0"
 edition = "2021"
 authors = ["TOETOE55 <584605539@qq.com>"]
 readme = "README.md"
+rust-version = "1.66.0"
 license = "MIT"
 keywords = ["macro", "cfg"]
 repository = "https://github.com/TOETOE55/cfg-vis"
